@@ -1,0 +1,983 @@
+---
+format: 
+  html:
+    #fig-format: svg
+    fig-dpi: 300
+    fig-width: 13
+    fig-height: 8
+    code-fold: true
+    toc: true
+    embed-resources: true
+params:
+  path.export: "results/2024-11-04-16-04-42.547127"
+title: "TTE Modeling Results"
+subtitle: "Results path: `r params$path.export`"
+author: "Lukas A. Widmer, Sebastian Weber, Yunnan Xu, Hans-Jochen Weber"
+---
+```{r, message=FALSE, warning=FALSE, echo=FALSE}
+library(qs)
+library(ggplot2)
+library(ggpubr)
+library(tidyverse)
+library(ggdist)
+library(scales)
+library(kableExtra)
+library(stringr)
+library(lubridate)
+library(posterior)
+theme_set(theme_bw(12))
+
+path.export <- params$path.export
+#path.export <- file.path("results", "2024-11-04-16-04-42.547127")
+outcome <- qread(file.path(path.export, "result.qs"))
+outcome_overall <- qread(file.path(path.export, "result-overall.qs"))
+
+outcome_fig <- outcome$trial_tibble |> mutate(
+  model = paste0(
+    ifelse(grepl("blrm", experiment), "B", "T"), 
+    case_when(
+      grepl("1cycle", experiment) ~ "1", 
+      grepl("3cycle", experiment) ~ "3", 
+      grepl("tte_cumulative", experiment) ~ "CU", 
+      grepl("tte_per_cycle", experiment) ~ "CO", 
+      TRUE ~ "error"
+    )
+  ),
+  scenario = 
+    case_when(
+      grepl("increasing", experiment) ~ "increasing", 
+      grepl("constant", experiment) ~ "constant", 
+      grepl("decreasing", experiment) ~ "decreasing", 
+      TRUE ~ "error"
+    ),
+  informative = factor(ifelse(
+    str_detect(experiment, "info_decr"), "decreasing w/dose", 
+    ifelse(str_detect(experiment, "info_incr"),  "increasing w/dose", "no")
+  ), levels=c("no", "increasing w/dose", "decreasing w/dose")),
+  dropout = (as.numeric(
+    paste0("0.", ifelse(str_detect(experiment, "_[:digit:]+_60_patients"), str_replace(experiment, "^.*?([:digit:]+)_.+?_patients$", "\\1"), "0"))
+  ) * 100) |> round() |> paste0("%")
+)
+
+dosing_levels <- c(
+  "All doses are predicted to be toxic",
+  "MTD found in the underdosing set",
+  "MTD found in the target set",
+  "MTD found in the overdosing set"
+) |> rev()
+
+dosing_colors <- c(
+  "#F8766D", 
+  "lightgreen", 
+  "lightblue",
+  "slateblue"
+)
+
+# filter(outcome_fig, replication_index == 1) |>
+#   select(experiment, scenario, informative, dropout) |>
+#   View()
+
+outcome_fig <- outcome_fig |>
+  mutate(
+    stop_reason_cumulative =
+      case_when(
+        stopped_due_to_max_N ~ "Max N reached",
+        stopped_due_to_toxicity ~ "All doses are predicted to be toxic",
+        MTD_is_underdose_cumulative ~ "MTD found in the underdosing set",
+        MTD_is_target_cumulative ~ "MTD found in the target set",
+        MTD_is_overdose_cumulative ~ "MTD found in the overdosing set",
+        .default = "Unknown"
+      ),
+    stop_reason_cycle1 =
+      case_when(
+        stopped_due_to_max_N ~ "Max N reached",
+        stopped_due_to_toxicity ~ "All doses are predicted to be toxic",
+        MTD_is_underdose_cycle1 ~ "MTD found in the underdosing set",
+        MTD_is_target_cycle1 ~ "MTD found in the target set",
+        MTD_is_overdose_cycle1 ~ "MTD found in the overdosing set",
+        .default = "Unknown"
+      )    
+  ) |>
+  mutate(
+    stop_reason_cumulative = factor(stop_reason_cumulative, levels=dosing_levels),
+    stop_reason_cycle1 = factor(stop_reason_cycle1, levels=dosing_levels),
+    dropout = factor(dropout),
+    model = factor(model)
+  )
+
+
+outcome_fig_noninformative <- outcome_fig |> filter(informative == "no")
+outcome_fig_informative <- outcome_fig |> 
+  filter(scenario == "constant") |>
+  mutate(x_label = paste0(informative, ", ", dropout)) |>
+  mutate(x_label = str_replace(string=x_label, pattern=" w/dose", replacement = "\nw/dose")) |>
+  mutate(x_label = factor(x_label))
+
+```
+# Trial speed
+
+```{r}
+p = list()
+
+for( cur_scenario in unique(outcome_fig_noninformative$scenario)){
+  cur_plot <- outcome_fig_noninformative |>
+    filter(scenario == cur_scenario) |>
+    ggplot(
+      aes(x = dropout, y=last_cohort_time, fill = model)
+    ) + 
+    # geom_boxplot( alpha = 0.5) + 
+    stat_histinterval(
+      position = position_dodgejust(width = 0.8), 
+      width = 0.8, 
+      breaks = 1:max(outcome_fig_noninformative$last_cohort_time)
+    ) +
+    ggtitle(paste(cur_scenario, "toxicity")) + 
+    ylab(ifelse(length(p) == 0, "# Cohorts", "")) + ylim(c(1,max(outcome_fig_noninformative$last_cohort_time))) +
+    labs(fill='Method:') +
+    xlab("Dropout over 3 cycles")
+  
+  p <- c(p, list(cur_plot))
+}
+plot_ncohorts <- ggarrange(plotlist = p, common.legend = T, ncol = 3) 
+plot_ncohorts_ann <- annotate_figure(plot_ncohorts, top = text_grob("Number of cohorts enrolled in trial", 
+                                          color = "black", face = "bold", size = 14))
+
+
+plot_ncohorts_ann
+```
+
+# Enrolled patients
+```{r}
+#| output: asis
+p = list()
+
+for( cur_scenario in unique(outcome_fig_noninformative$scenario)){
+  
+  cur_data <- outcome_fig_noninformative |>
+    filter(scenario == cur_scenario) 
+  
+  cur_plot <- cur_data |>
+    ggplot(
+      aes(x = dropout, y=num_patients_start, fill = model)
+    ) + 
+    # geom_boxplot( alpha = 0.5) + 
+    stat_histinterval(
+      position = position_dodgejust(width = 0.8), 
+      width = 0.8, 
+      breaks = 3*(1:max(outcome_fig_noninformative$last_cohort_time))
+    ) +
+    ggtitle(paste(cur_scenario, "toxicity")) + 
+    ylab(ifelse(length(p) == 0, "# Patients", "")) + ylim(c(1,max(outcome_fig_noninformative$num_patients_start))) +
+    labs(fill='Method:') + 
+    xlab("Dropout over 3 cycles")
+  
+  cur_data_summary <- cur_data |> 
+    group_by(dropout, model) |> 
+    summarize(num_patients_start = rvar(num_patients_start), .groups = "keep") |>
+    mutate(
+      num_patients_start_mean = mean(num_patients_start),
+      num_patients_start_mean_mcse = mcse_mean(num_patients_start)
+    )
+  
+  cat(paste0("\n### ", cur_scenario, "\n\n"))
+
+  if (interactive()) {
+    print(cur_data_summary |> kable())
+  } else {
+    cat(sep = "\n", knitr::knit_child(quiet = TRUE, text = c(
+      "```{r}",
+      "#| echo: false",
+      "cur_data_summary |> kable(digits = 1)",
+      "```"
+    )))
+  }
+  
+  p <- c(p, list(cur_plot))
+}
+plot_npatients <- ggarrange(plotlist = p, common.legend = T, ncol = 3) 
+plot_npatients_ann <- annotate_figure(plot_npatients, top = text_grob("Number of patients enrolled in trial", 
+                                                                  color = "black", face = "bold", size = 14))
+
+
+ggsave(file.path(path.export, "npatients.pdf"), plot = plot_npatients_ann , width=20*2.5, height=10*1.2, units="cm")
+```
+### Plot
+
+```{r}
+plot_npatients_ann
+```
+
+# Stopping reasons & MTD allocation, Cycle 1 
+```{r}
+preprocess_data_MTD_cycle1 <- function(x, cur_scenario) {
+  cur_data <- x |>
+    filter(scenario == cur_scenario)
+  
+  cur_data |> 
+    count(model, dropout, stop_reason_cycle1) |>    
+    group_by(model, dropout) |>
+    mutate(percent = round(prop.table(n) * 100)) |>
+    mutate(percent = ifelse(percent > 0, paste0(percent, "%"), ""))
+}
+
+p_cycle1_MTDs = list()
+for(cur_scenario in unique(outcome_fig_noninformative$scenario)) {
+  cur_plot <- preprocess_data_MTD_cycle1(outcome_fig_noninformative, cur_scenario) |>
+    ggplot(aes(x = dropout, y = n, fill = stop_reason_cycle1)) + 
+    geom_bar(position = "fill", alpha = 0.8, stat="identity") + 
+    ggtitle(paste(cur_scenario, "toxicity")) + 
+    ylab(ifelse(length(p_cycle1_MTDs) == 0, "Relative frequencies", "")) +
+    xlab("Dropout over 3 cycles") + 
+    scale_fill_manual(values = dosing_colors, drop = FALSE) +
+    facet_grid(. ~ factor(model), scales = "free", space = "free_x")+
+    labs(fill='Stopping reason') +
+    theme(axis.text.x = element_text(angle = 45, size = 8, hjust = 1)) + 
+    geom_text(
+      aes(label = percent),
+      position = position_fill(vjust=0.5), 
+      size = 3
+    )
+  
+  p_cycle1_MTDs <- c(p_cycle1_MTDs, list(cur_plot))
+}
+plot_cycle1_MTDs <- ggarrange( plotlist = p_cycle1_MTDs, common.legend = T, ncol = 3)
+plot_cycle1_MTDs_ann <- plot_cycle1_MTDs |>
+  annotate_figure(
+    top = text_grob(
+      "Stopping reasons: relative frequencies, cycle-1 MTDs",
+      color = "black", face = "bold", size = 14
+    )
+  )
+
+plot_cycle1_MTDs_ann
+
+ggsave(file.path(path.export, "MTD_cycle1_frequencies.pdf"), plot = plot_cycle1_MTDs_ann , width=20*2.5, height=10*1.2, units="cm")
+
+
+```
+
+# Stopping reasons & MTD allocation, Cumulative
+
+```{r}
+#| output: asis
+preprocess_data_MTD_cumulative <- function(x, cur_scenario) {
+  cur_data <- x |>
+    filter(scenario == cur_scenario)
+  
+  cur_data |> 
+    count(model, dropout, stop_reason_cumulative) |>    
+    group_by(model, dropout) |>
+    mutate(percent = round(prop.table(n) * 100)) |>
+    mutate(percent = ifelse(percent > 0, paste0(percent, "%"), ""))
+}
+
+p_cumulative_MTDs = list()
+
+n_sims <- unique((outcome_fig_noninformative |>
+    count(model, dropout, scenario))$n)
+
+for(cur_scenario in unique(outcome_fig_noninformative$scenario)) {
+  cur_plot <- preprocess_data_MTD_cumulative(outcome_fig_noninformative, cur_scenario) |>
+    ggplot(aes(x = dropout, y = n, fill = stop_reason_cumulative)) + 
+    geom_bar(position = "fill", alpha = 0.8, stat="identity") + 
+    ggtitle(paste(cur_scenario, "toxicity")) + 
+    ylab(ifelse(length(p_cumulative_MTDs) == 0, "Relative frequencies", "")) +
+    xlab("Dropout over 3 cycles") + 
+    scale_fill_manual(values = dosing_colors, drop = FALSE) +
+    facet_grid(. ~ factor(model), scales = "free", space = "free_x")+
+    labs(fill='Stopping reason') +
+    theme(axis.text.x = element_text(angle = 45, size = 8, hjust = 1)) + 
+    geom_text(
+      aes(label = percent),
+      position = position_fill(vjust=0.5), 
+      size = 3
+    )
+  
+  p_cumulative_MTDs <- c(p_cumulative_MTDs, list(cur_plot))
+  
+  cur_data_summary <- outcome_fig_noninformative |>
+    filter(scenario == cur_scenario) |>
+    group_by(dropout, model) |>
+    summarize(
+      rvar_MTD_target = rvar(MTD_is_target_cumulative * 1.0), 
+      rvar_MTD_overdose = rvar(MTD_is_overdose_cumulative * 1.0), 
+      rvar_MTD_underdose = rvar(MTD_is_underdose_cumulative * 1.0), 
+      rvar_stopped = rvar(stopped_due_to_toxicity * 1.0),
+      .groups = "keep"
+    ) |>
+    mutate(
+      mean_MTD_target = mean(rvar_MTD_target),
+      mcse_MTD_target = mcse_mean(rvar_MTD_target),
+      mean_MTD_overdose = mean(rvar_MTD_overdose),
+      mcse_MTD_overdose = mcse_mean(rvar_MTD_overdose),
+      mean_MTD_underdose = mean(rvar_MTD_underdose),
+      mcse_MTD_underdose = mcse_mean(rvar_MTD_underdose),
+      mean_stopped = mean(rvar_stopped),
+      mcse_stopped = mcse_mean(rvar_stopped)
+    )
+  
+
+  cat(paste0("\n### ", cur_scenario, "\n\n"))
+
+  if (interactive()) {
+    print(cur_data_summary |> kable())
+  } else {
+    cat(sep = "\n", knitr::knit_child(quiet = TRUE, text = c(
+      "```{r}",
+      "#| echo: false",
+      "cur_data_summary |> kable(digits = 2)",
+      "```"
+    )))
+  }
+}
+```
+### Plot
+```{r}
+plot_cumulative_MTDs <- ggarrange( plotlist = p_cumulative_MTDs, common.legend = T, ncol = 3)
+plot_cumulative_MTDs_ann <- plot_cumulative_MTDs |>
+  annotate_figure(
+    top = text_grob(
+      "Stopping reasons: relative frequencies, cumulative MTDs",
+      color = "black", face = "bold", size = 14
+    )
+  )
+
+plot_cumulative_MTDs_ann
+
+ggsave(file.path(path.export, "MTD_cumulative_frequencies.png"), plot = plot_cumulative_MTDs_ann , width=20*2.5, height=10*1.2, units="cm")
+ggsave(file.path(path.export, "MTD_cumulative_frequencies.pdf"), plot = plot_cumulative_MTDs_ann , width=20*2.5, height=10*1.2, units="cm")
+
+```
+
+## Joint figure
+
+```{r}
+plotlist_both <- c(
+    p_cycle1_MTDs |> map(\(x){x + xlab("")}), 
+    p_cumulative_MTDs |> map(\(x){x + ggtitle("")})
+  )
+
+plotlist_both[[1]] <- plotlist_both[[1]] + ylab("Relative frequencies, cycle-1")
+plotlist_both[[4]] <- plotlist_both[[4]] + ylab("Relative frequencies, cumulative")
+plot_both_MTDs <- ggarrange(
+  plotlist = plotlist_both,
+  common.legend = T, ncol = 3, nrow = 2
+)
+plot_both_MTDs_ann <- plot_both_MTDs |>
+  annotate_figure(
+    top = text_grob(
+      "Stopping reasons: relative frequencies, cycle-1 and cumulative MTDs",
+      color = "black", face = "bold", size = 14
+    )
+  )
+
+
+ggsave(file.path(path.export, "MTD_frequencies.pdf"), plot = plot_both_MTDs_ann , width=20*2.5, height=10*2, units="cm")
+ggsave(file.path(path.export, "MTD_frequencies.png"), plot = plot_both_MTDs_ann , width=20*2.5, height=10*2, units="cm")
+
+
+plot_both_MTDs_ann
+```
+# Patient allocation, Cycle 1
+
+```{r}
+
+
+p_cycle1_patients = list()
+for(cur_scenario in unique(outcome_fig_noninformative$scenario)) {
+  res <- outcome_fig_noninformative |>
+    select(
+      scenario, model, dropout, 
+      num_patients_cycle1, 
+      num_patients_overdose_cycle1,
+      num_patients_target_cycle1,
+      num_patients_underdose_cycle1
+    ) |> 
+    group_by(scenario, model, dropout) |>
+    summarize(
+      prob_patients_overdose_cycle1  = sum(num_patients_overdose_cycle1)  / sum(num_patients_cycle1),
+      prob_patients_target_cycle1    = sum(num_patients_target_cycle1)    / sum(num_patients_cycle1),
+      prob_patients_underdose_cycle1 = sum(num_patients_underdose_cycle1) / sum(num_patients_cycle1)
+    ) |>
+    filter(scenario == cur_scenario)
+  
+  res_long <- res |> 
+    pivot_longer(
+      cols = starts_with("prob_patients"), 
+      names_transform = function(name) {
+        name |>
+          str_replace_all("prob_patients_", "") |> 
+          str_replace_all("_cycle1", "")
+      }
+    ) |> 
+    mutate(name = factor(name)) |>
+    mutate(percent = ifelse(round(value * 100) > 0, paste0(round(value * 100), "%"), ""))
+  
+  cur_plot <- res_long |>
+    ggplot(aes(x = dropout, y = value, fill = name)) + 
+    geom_bar(position = "fill", alpha = 0.8, stat="identity") + 
+    # stat_slab(
+    #   position = position_dodgejust(width = 0.8), 
+    #   width = 0.8, 
+    # ) +
+    #geom_boxplot( alpha = 0.5) +
+    ggtitle(paste(cur_scenario, "toxicity")) + 
+    ylab(ifelse(length(p_cycle1_patients) == 0, "Relative frequencies", "")) +
+    xlab("Dropout over 3 cycles") + 
+    scale_fill_manual(values=c("#F8766D", "lightgreen", "lightblue"), drop = FALSE) +
+    facet_grid(. ~ factor(model), scales = "free", space = "free_x")+
+    labs(fill='Interval') +
+    theme(axis.text.x = element_text(angle = 45, size = 8, hjust = 1)) +
+    geom_text(
+      aes(label = percent),
+      position = position_fill(vjust=0.5), 
+      size = 3
+    )
+  
+  p_cycle1_patients <- c(p_cycle1_patients, list(cur_plot))
+}
+plot_cycle1_patients <- ggarrange( plotlist = p_cycle1_patients, common.legend = T, ncol = 3)
+plot_cycle1_patients_ann <- plot_cycle1_patients |>
+  annotate_figure(
+    top = text_grob(
+      "Probability of dosing patients in cycle 1",
+      color = "black", face = "bold", size = 14
+    )
+  )
+
+ggsave(file.path(path.export, "patients_cycle1_frequencies.png"), plot = plot_cycle1_patients_ann , width=20*2.5, height=10*1.2, units="cm")
+ggsave(file.path(path.export, "patients_cycle1_frequencies.pdf"), plot = plot_cycle1_patients_ann , width=20*2.5, height=10*1.2, units="cm")
+
+plot_cycle1_patients_ann
+
+
+
+```
+
+# Patient allocation, Cumulative 
+
+```{r}
+p_cumulative_patients = list()
+for(cur_scenario in unique(outcome_fig_noninformative$scenario)) {
+  res <- outcome_fig_noninformative |>
+    select(
+      scenario, model, dropout, 
+      num_patients_cumulative, 
+      num_patients_overdose_cumulative,
+      num_patients_target_cumulative,
+      num_patients_underdose_cumulative
+    ) |>
+    group_by(scenario, model, dropout) |>
+    summarize(
+      prob_patients_overdose_cumulative  = sum(num_patients_overdose_cumulative)  / sum(num_patients_cumulative),
+      prob_patients_target_cumulative    = sum(num_patients_target_cumulative)    / sum(num_patients_cumulative),
+      prob_patients_underdose_cumulative = sum(num_patients_underdose_cumulative) / sum(num_patients_cumulative)
+    ) |>
+    filter(scenario == cur_scenario)
+  
+  res_long <- res |> 
+    pivot_longer(
+      cols = starts_with("prob_patients"), 
+      names_transform = function(name) {
+        name |>
+          str_replace_all("prob_patients_", "") |> 
+          str_replace_all("_cumulative", "")
+      }
+    ) |>     
+    mutate(name = factor(name)) |>
+    mutate(percent = ifelse(round(value * 100) > 0, paste0(round(value * 100), "%"), ""))
+  
+  cur_plot <- res_long |>
+    ggplot(aes(x = dropout, y = value, fill = name)) + 
+    geom_bar(position = "fill", alpha = 0.8, stat="identity") + 
+    # stat_slab(
+    #   position = position_dodgejust(width = 0.8), 
+    #   width = 0.8, 
+    # ) +
+    # geom_boxplot( alpha = 0.5) +
+    ggtitle(paste(cur_scenario, "toxicity")) + 
+    ylab(ifelse(length(p_cumulative_patients) == 0, "Relative frequencies", "")) +
+    xlab("Dropout over 3 cycles") + 
+    scale_fill_manual(values=c("#F8766D", "lightgreen", "lightblue"), drop = FALSE) +
+    facet_grid(. ~ factor(model), scales = "free", space = "free_x")+
+    labs(fill='Interval') +
+    theme(axis.text.x = element_text(angle = 45, size = 8, hjust = 1)) +
+    geom_text(
+      aes(label = percent),
+      position = position_fill(vjust=0.5), 
+      size = 3
+    )
+  
+  p_cumulative_patients <- c(p_cumulative_patients, list(cur_plot))
+}
+plot_cumulative_patients <- ggarrange( plotlist = p_cumulative_patients, common.legend = T, ncol = 3)
+plot_cumulative_patients_ann <- plot_cumulative_patients |>
+  annotate_figure(
+    top = text_grob(
+      "Probability of dosing patients over 3 cycles (cumulative)",
+      color = "black", face = "bold", size = 14
+    )
+  )
+
+
+ggsave(file.path(path.export, "patients_cumulative_frequencies.png"), plot = plot_cumulative_patients_ann , width=20*2.5, height=10*1.2, units="cm")
+ggsave(file.path(path.export, "patients_cumulative_frequencies.pdf"), plot = plot_cumulative_patients_ann , width=20*2.5, height=10*1.2, units="cm")
+
+ggsave(file.path(path.export, "patient_allocation_main.png"), plot = p_cumulative_patients[[1]] + ggtitle("Probability of dosing patients over 3 cycles,\n(cumulative) constant toxicity"), width=15, height=12, units="cm")
+
+ggsave(file.path(path.export, "patient_allocation_main.pdf"), plot = p_cumulative_patients[[1]] + ggtitle("Probability of dosing patients over 3 cycles,\n(cumulative) constant toxicity"), width=15, height=12, units="cm")
+
+
+
+plot_cumulative_patients_ann
+```
+## Joint figure
+
+```{r}
+plotlist_both <- c(
+    p_cycle1_patients |> map(\(x){x + xlab("")}), 
+    p_cumulative_patients |> map(\(x){x + ggtitle("")})
+  )
+
+plotlist_both[[1]] <- plotlist_both[[1]] + ylab("Relative frequencies, cycle-1")
+plotlist_both[[4]] <- plotlist_both[[4]] + ylab("Relative frequencies, cumulative")
+plot_both_patients <- ggarrange(
+  plotlist = plotlist_both,
+  common.legend = T, ncol = 3, nrow = 2
+)
+plot_both_patients_ann <- plot_both_patients |>
+  annotate_figure(
+    top = text_grob(
+      "Probability of dosing patients",
+      color = "black", face = "bold", size = 14
+    )
+  )
+
+ggsave(file.path(path.export, "patient_frequencies.pdf"), plot = plot_both_patients_ann , width=20*2.5, height=10*2, units="cm")
+ggsave(file.path(path.export, "patient_frequencies.png"), plot = plot_both_patients_ann , width=20*2.5, height=10*2, units="cm")
+
+plot_both_patients_ann
+
+```
+# Trial length
+```{r}
+#| output: asis
+p_trial_length_days = list()
+
+res <- outcome_fig_noninformative |>
+  select(
+    scenario, model, dropout, 
+    start_to_last_patient_cens_event_dt
+  ) |>
+  mutate(length_years = time_length(start_to_last_patient_cens_event_dt, "years"))
+
+for(cur_scenario in unique(outcome_fig_noninformative$scenario)) {
+  cur_plot <- res |> filter(scenario == cur_scenario) |>
+    ggplot(aes(x = dropout, y = length_years)) + 
+    ggtitle(paste(cur_scenario, "toxicity")) + 
+    # stat_slab(
+    #   position = position_dodgejust(width = 0.8), 
+    #   width = 0.8, 
+    # ) +
+    geom_boxplot( alpha = 0.5) +
+    ylab(ifelse(length(p_trial_length_days) == 0, "Years", "")) +
+    scale_y_continuous(breaks=c(0, 2, 4, 6, 8), limits=c(0, 9)) + 
+    xlab("Dropout over 3 cycles") + 
+    # scale_fill_manual(values=c("#F8766D", "lightgreen", "lightblue"), drop = FALSE) +
+    facet_grid(. ~ model, scales = "free", space = "free_x")+
+    labs(fill='Interval') +
+    theme(axis.text.x = element_text(angle = 45, size = 8, hjust = 1))
+  
+  cur_data_summary <- res |> 
+    filter(scenario == cur_scenario) |>
+    group_by(dropout, model) |> 
+    summarize(length_years = rvar(length_years), .groups = "keep") |>
+    mutate(
+      length_years_mean = mean(length_years),
+      length_years_mean_mcse = mcse_mean(length_years)
+    )
+  
+  cat(paste0("\n### ", cur_scenario, "\n\n"))
+
+  if (interactive()) {
+    print(cur_data_summary |> kable())
+  } else {
+    cat(sep = "\n", knitr::knit_child(quiet = TRUE, text = c(
+      "```{r}",
+      "#| echo: false",
+      "cur_data_summary |> kable(digits = 1)",
+      "```"
+    )))
+  }
+  
+  p_trial_length_days <- c(p_trial_length_days, list(cur_plot))
+}
+
+plot_trial_length_days <- ggarrange( plotlist = p_trial_length_days[c(2,3)], common.legend = T, ncol = 2)
+plot_trial_length_days_ann <- plot_trial_length_days |>
+  annotate_figure(
+    top = text_grob(
+      "Absolute trial length",
+      color = "black", face = "bold", size = 14
+    )
+  )
+
+trial_length_const <- p_trial_length_days[[1]] + ggtitle("Absolute trial length, constant toxicity") 
+
+ggsave(file.path(path.export, "trial_lengths_all.pdf"), plot = plot_trial_length_days_ann, width=10*2.2, height=14, units="cm")
+
+ggsave(file.path(path.export, "trial_lengths.png"), plot = trial_length_const, width=10, height=14, units="cm")
+ggsave(file.path(path.export, "trial_lengths.pdf"), plot = trial_length_const, width=10, height=14, units="cm")
+
+```
+
+### Constant scenario plot
+```{r}
+trial_length_const
+```
+
+### Increasing / decreasing scenario plot
+```{r}
+plot_trial_length_days_ann
+```
+
+# MTD dose distribution
+
+```{r}
+p = list()
+
+for(cur_scenario in unique(outcome_fig_noninformative$scenario)) {
+  cur_plot <- outcome_fig_noninformative |>
+    filter(scenario == cur_scenario) |>
+    ggplot(aes(x = dropout, y = MTD_dose, fill = model)) +
+    # geom_boxplot(alpha = 0.5) + 
+    scale_y_continuous(trans = 'log10', breaks = sort(unique(outcome_fig_noninformative$MTD_dose))) +
+    stat_histinterval(
+      position = position_dodgejust(width = 0.8),
+      width = 0.8
+    ) +
+    # geom_hline(yintercept = true_critical_dose[i],  color = "black", size=1) +
+    # # geom_hline(yintercept = 5.03,  color = "black", size=1,linetype = "dashed") + 
+    ylab("MTD") +xlab("Historical sample size (n_h)")+
+    theme(axis.text.x = element_text(size = 9))  +
+    ggtitle(paste(cur_scenario, "toxicity"))+
+    labs(fill='Model:')
+  
+  p <- c(p, list(cur_plot))
+}
+plot_MTDs <- ggarrange(plotlist = p, common.legend = T, ncol = 3) 
+plot_MTDs_ann <- plot_MTDs |> annotate_figure(
+  top = text_grob("Distribution of declared MTDs", 
+  color = "black", face = "bold", size = 14)
+)
+
+plot_MTDs_ann
+```
+# Informative stopping reasons & MTD allocation, Cycle 1 
+```{r}
+preprocess_data_MTD_cycle1_info <- function(x) {
+  x |> 
+    count(model, x_label, stop_reason_cycle1) |>    
+    group_by(model, x_label) |>
+    mutate(percent = round(prop.table(n) * 100)) |>
+    mutate(percent = ifelse(percent > 0, paste0(percent, "%"), ""))
+}
+
+cur_plot_cycle1_MTDs <- outcome_fig_informative |>
+  preprocess_data_MTD_cycle1_info() |>
+  ggplot(aes(x_label, y = n, fill = stop_reason_cycle1)) + 
+  geom_bar(position = "fill", alpha = 0.8, stat = "identity") + 
+  ylab("Relative frequencies") +
+  xlab("Informative dropout?") + 
+  scale_fill_manual(values = dosing_colors, drop = FALSE) +
+  facet_grid(. ~ model, scales = "free", space = "free_x")+
+  labs(fill='Stopping reason') +
+  theme(axis.text.x = element_text(angle = 90, size = 8, hjust = 1, vjust = 0.5)) +
+    geom_text(
+      aes(label = percent),
+      position = position_fill(vjust=0.5), 
+      size = 3
+    )
+  
+
+
+plot_cycle1_MTDs_ann <- cur_plot_cycle1_MTDs |>
+  annotate_figure(
+    top = text_grob(
+      "Stopping reasons: Informative censoring, cycle-1 MTDs",
+      color = "black", face = "bold", size = 14
+    )
+  )
+
+plot_cycle1_MTDs_ann
+```
+
+# Informative stopping reasons & MTD allocation, Cumulative 
+```{r}
+preprocess_data_MTD_cumulative_info <- function(x) {
+  x |> 
+    count(model, x_label, stop_reason_cumulative) |>    
+    group_by(model, x_label) |>
+    mutate(percent = round(prop.table(n) * 100)) |>
+    mutate(percent = ifelse(percent > 0, paste0(percent, "%"), ""))
+}
+
+cur_plot_cumulative_MTDs_info <- outcome_fig_informative |>
+  preprocess_data_MTD_cumulative_info() |>
+  ggplot(aes(x_label, y = n, fill = stop_reason_cumulative)) + 
+  geom_bar(position = "fill", alpha = 0.8, stat = "identity") + 
+  ylab("Relative frequencies") +
+  xlab("Informative dropout?") + 
+  scale_fill_manual(values = dosing_colors, drop = FALSE) +
+  facet_grid(. ~ model, scales = "free", space = "free_x")+
+  labs(fill='Stopping reason') +
+  theme(axis.text.x = element_text(angle = 90, size = 8, hjust = 1, vjust = 0.5)) +
+  geom_text(
+      aes(label = percent),
+      position = position_fill(vjust=0.5), 
+      size = 3
+    ) + 
+  theme(legend.justification = "center", legend.position = "top")
+  
+
+
+plot_cumulative_MTDs_info_ann <- cur_plot_cumulative_MTDs_info |>
+  annotate_figure(
+    top = text_grob(
+      "Stopping reasons: Informative censoring, cumulative MTDs",
+      color = "black", face = "bold", size = 14
+    )
+  ) 
+
+
+
+plot_cumulative_MTDs_info_ann
+
+
+ggsave(file.path(path.export, "MTD_cumulative_frequencies_info.png"), plot = plot_cumulative_MTDs_info_ann , width=20*1.5, height=10*1.2, units="cm")
+ggsave(file.path(path.export, "MTD_cumulative_frequencies_info.pdf"), plot = plot_cumulative_MTDs_info_ann , width=20*1.5, height=10*1.2, units="cm")
+```
+## Joint plot
+```{r, fig.height= 12}
+plotlist_both <- list(
+    cur_plot_cycle1_MTDs + xlab("") + ylab("Relative frequencies, cycle-1") + guides(fill = guide_legend(nrow = 2)), 
+    cur_plot_cumulative_MTDs_info + ggtitle("") + ylab("Relative frequencies, cumulative")
+  )
+
+plot_both_patients <- ggarrange(
+  plotlist = plotlist_both,
+  common.legend = T, ncol = 1, nrow = 2
+)
+plot_both_patients_ann_info <- plot_both_patients |>
+  annotate_figure(
+    top = text_grob(
+      "Stopping reasons: relative frequencies, cycle-1 and cumulative MTDs",
+      color = "black", face = "bold", size = 14
+    )
+  )
+
+plot_both_patients_ann_info
+
+ggsave(file.path(path.export, "MTD_frequencies_info.pdf"), plot = plot_both_patients_ann_info , width=20, height=20, units="cm")
+
+```
+
+
+
+# Informative patient allocation, Cycle-1
+```{r}
+res <- outcome_fig_informative |>
+  select(
+    model, x_label,
+    num_patients_cycle1, 
+    num_patients_overdose_cycle1,
+    num_patients_target_cycle1,
+    num_patients_underdose_cycle1
+  ) |>
+  group_by(model, x_label) |>
+  summarize(
+    prob_patients_overdose_cycle1  = sum(num_patients_overdose_cycle1)  / sum(num_patients_cycle1),
+    prob_patients_target_cycle1    = sum(num_patients_target_cycle1)    / sum(num_patients_cycle1),
+    prob_patients_underdose_cycle1 = sum(num_patients_underdose_cycle1) / sum(num_patients_cycle1)
+  ) 
+
+res_long <- res |> 
+  pivot_longer(
+    cols = starts_with("prob_patients"), 
+    names_transform = function(name) {
+      name |>
+        str_replace_all("prob_patients_", "") |> 
+        str_replace_all("_cycle1", "")
+    }
+  ) |> 
+  mutate(name = factor(name)) |>
+  mutate(percent = ifelse(round(value * 100) > 0, paste0(round(value * 100), "%"), "")) 
+
+cur_plot_cycle1_patients <- res_long |>
+  ggplot(aes(x = x_label, y = value, fill = name)) + 
+  # stat_slab(
+  #   position = position_dodgejust(width = 0.8), 
+  #   width = 0.8, 
+  # ) +
+  geom_bar(position = "fill", alpha = 0.8, stat="identity") + 
+  ylab(ifelse(length(p_cycle1_patients) == 0, "Relative frequencies", "")) +
+  xlab("Informative dropout?") + 
+  scale_fill_manual(values=c("#F8766D", "lightgreen", "lightblue"), drop = FALSE) +
+  facet_grid(. ~ model, scales = "free", space = "free_x")+
+  labs(fill='Interval') +
+  theme(axis.text.x = element_text(angle = 90, size = 8, hjust = 1, vjust = 0.5)) +
+  geom_text(
+    aes(label = percent),
+    position = position_fill(vjust=0.5),
+    size = 3
+  )
+
+plot_cycle1_patients_ann <- cur_plot_cycle1_patients |>
+  annotate_figure(
+    top = text_grob(
+      "Probability of dosing patients in cycle 1",
+      color = "black", face = "bold", size = 14
+    )
+  )
+
+plot_cycle1_patients_ann
+
+
+```
+
+# Informative patient allocation, Cumulative 
+
+```{r}
+p_cumulative_patients = list()
+
+res <- outcome_fig_informative |>
+  select( 
+    model, x_label, 
+    num_patients_cumulative, 
+    num_patients_overdose_cumulative,
+    num_patients_target_cumulative,
+    num_patients_underdose_cumulative
+  ) |>
+  group_by(model, x_label) |>
+  summarize(
+    prob_patients_overdose_cumulative  = sum(num_patients_overdose_cumulative)  / sum(num_patients_cumulative),
+    prob_patients_target_cumulative    = sum(num_patients_target_cumulative)    / sum(num_patients_cumulative),
+    prob_patients_underdose_cumulative = sum(num_patients_underdose_cumulative) / sum(num_patients_cumulative)
+  ) 
+
+res_long <- res |> 
+  pivot_longer(
+    cols = starts_with("prob_patients"), 
+    names_transform = function(name) {
+      name |>
+        str_replace_all("prob_patients_", "") |> 
+        str_replace_all("_cumulative", "")
+    }
+  ) |>
+  mutate(name = factor(name)) |>
+  mutate(percent = ifelse(round(value * 100) > 0, paste0(round(value * 100), "%"), "")) 
+  
+
+cur_plot_cumulative_patients <- res_long |>
+  ggplot(aes(x = x_label, y = value, fill = name)) + 
+  # stat_slab(
+  #   position = position_dodgejust(width = 0.8), 
+  #   width = 0.8, 
+  # ) +
+  geom_bar(position = "fill", alpha = 0.8, stat="identity") + 
+  ylab(ifelse(length(p_cumulative_patients) == 0, "Relative frequencies", "")) +
+  xlab("Informative dropout?") + 
+  scale_fill_manual(values=c("#F8766D", "lightgreen", "lightblue"), drop = FALSE) +
+  facet_grid(. ~ model, scales = "free", space = "free_x")+
+  labs(fill='Interval') +
+  theme(axis.text.x = element_text(angle = 90, size = 8, hjust = 1, vjust = 0.5)) +
+  geom_text(
+    aes(label = percent),
+    position = position_fill(vjust=0.5),
+    size = 3
+  ) +   theme(legend.justification = "center", legend.position = "top")
+
+plot_cumulative_patients_ann <- cur_plot_cumulative_patients |>
+  annotate_figure(
+    top = text_grob(
+      "Probability of dosing patients over 3 cycles (cumulative)",
+      color = "black", face = "bold", size = 14
+    )
+  )
+
+plot_cumulative_patients_ann
+
+ggsave(file.path(path.export, "patient_cumulative_frequencies_info.png"), plot = plot_cumulative_patients_ann , width=20*1.5, height=10*1.2, units="cm")
+ggsave(file.path(path.export, "patient_cumulative_frequencies_info.pdf"), plot = plot_cumulative_patients_ann , width=20*1.5, height=10*1.2, units="cm")
+```
+## Joint plot
+```{r, fig.height=12}
+plotlist_both <- list(
+    cur_plot_cycle1_patients + xlab("") + ylab("Relative frequencies, cycle-1"), 
+    cur_plot_cumulative_patients + ggtitle("") + ylab("Relative frequencies, cumulative")
+  )
+
+plot_both_patients <- ggarrange(
+  plotlist = plotlist_both,
+  common.legend = T, ncol = 1, nrow = 2
+)
+plot_both_patients_ann_info <- plot_both_patients |>
+  annotate_figure(
+    top = text_grob(
+      "Probability of dosing patients",
+      color = "black", face = "bold", size = 14
+    )
+  )
+
+ggsave(file.path(path.export, "patient_frequencies_info.pdf"), plot = plot_both_patients_ann_info , width=20, height=20, units="cm")
+
+
+plot_both_patients_ann_info
+
+
+```
+
+
+# Trial length
+```{r}
+
+
+
+plot_trial_length_days_info <- outcome_fig_informative |>
+  mutate(length_years = time_length(start_to_last_patient_cens_event_dt, "years")) |>
+  ggplot(aes(x = x_label, y = length_years)) + 
+  geom_boxplot( alpha = 0.5) +
+  ylab(ifelse(length(p_trial_length_days) == 0, "Years", "")) +
+  xlab("Dropout over 3 cycles") + 
+    # scale_fill_manual(values=c("#F8766D", "lightgreen", "lightblue"), drop = FALSE) +
+  facet_grid(. ~ model, scales = "free", space = "free_x")+
+  #labs(fill='Interval') +
+  theme(axis.text.x = element_text(angle = 90, size = 8, hjust = 1, vjust = 0.5))
+  
+  # ggplot(aes(x_label, y = n, fill = stop_reason_cumulative)) + 
+  # geom_bar(position = "fill", alpha = 0.8, stat = "identity") + 
+  # ylab("Relative frequencies") +
+  # xlab("Informative dropout?") + 
+  # scale_fill_manual(values = dosing_colors, drop = FALSE) +
+  # facet_grid(. ~ model, scales = "free", space = "free_x")+
+
+
+plot_trial_length_days_info_ann <- plot_trial_length_days_info |>
+  annotate_figure(
+    top = text_grob(
+      "Absolute trial lengths: Informative censoring",
+      color = "black", face = "bold", size = 14
+    )
+  )
+
+
+ggsave(file.path(path.export, "trial_lengths_info.png"), plot = plot_trial_length_days_info_ann , width=20, height=14, units="cm")
+
+ggsave(file.path(path.export, "trial_lengths_info.pdf"), plot = plot_trial_length_days_info_ann , width=20, height=14, units="cm")
+
+```
+
+```{r}
+plot_trial_length_days_info_ann
+```
+
